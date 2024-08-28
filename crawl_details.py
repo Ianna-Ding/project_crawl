@@ -4,6 +4,13 @@ import requests
 from lxml import etree
 from urllib.parse import urljoin
 import json
+from fake_useragent import UserAgent
+import re
+import random
+import csv
+
+
+requests.packages.urllib3.disable_warnings()
 
 
 stops_space = (
@@ -16,11 +23,188 @@ stops_space = (
         '\n')  # '\|'
 
 
+accounts = [
+        {"mobile": "15921030319", "pwd": "shjtdxwyz2022"},
+        {"mobile": "18556356687", "pwd": "hshwk123"},
+        {"mobile": "15026550949", "pwd": "6666666666"},
+        {"mobile": "13723015921", "pwd": "jzyb199707"},
+        {"mobile": "13924177919", "pwd": "@Tian618"},
+        {"mobile": "13052388865", "pwd": "nj8sj.fGpjMQ@m"},
+        {"mobile": "18935897814", "pwd": "Saya030124"},
+        {"mobile": "18811322359", "pwd": "2XTA5srk2@45VuA"},
+        {"mobile": "19850075672", "pwd": "izaiwen72"},
+        {"mobile": "18800269809", "pwd": "liji2014"}
+    ]
+
+
+def delete_proxy(proxy):
+    requests.get("http://127.0.0.1:5000/delete/?proxy={}".format(proxy))
+
+
+def get_proxy():
+    while True:
+        try:
+            # 获取IP
+            proxy_response = requests.get("http://127.0.0.1:5000/get/")
+            proxy = proxy_response.json().get("proxy")
+
+            if not proxy:
+                print("未获取到IP，等待3秒后重试")
+                time.sleep(3)
+                continue
+
+            # 测试IP是否支持HTTPS
+            test_url = "https://httpbin.org/ip"
+            headers = {
+                'User-Agent': UserAgent().random
+            }
+            proxies = {"https": f"https://{proxy}"}
+            response = requests.get(test_url, proxies=proxies, headers=headers, timeout=5)
+            time.sleep(0.5)
+
+            if response.status_code == 200:
+                print(f"IP{proxy}通过HTTPS测试")
+                return proxy
+            else:
+                print(f"IP{proxy}不支持HTTPS，等待0.5秒后重试")
+                time.sleep(0.5)
+
+        except requests.exceptions.RequestException as e:
+            print(f"IP{proxy}不可用: {e}")
+            if proxy:
+                delete_proxy(proxy)  # 删除无效的IP
+            print("等待0.5秒后重试")
+            time.sleep(0.5)
+
+
+class SessionManager:
+    def __init__(self, accounts):
+        self.accounts = accounts
+        self.current_index = 0
+        self.session = None
+        self.max_attempts = 3  # 每个账号在同一个IP上的最大重试次数
+        self.ip_switch_limit = 5  # 更换5个IP后切换账号
+        self.attempt_count = 0
+        self.ip_switch_count = 0
+
+    def get_current_account(self):
+        return self.accounts[self.current_index]
+
+    def create_new_session(self):
+        # 重置尝试次数和IP切换计数
+        self.attempt_count = 0
+        self.ip_switch_count = 0
+        account = self.get_current_account()
+        mobile, pwd = account['mobile'], account['pwd']
+        print(f"使用账号{mobile}尝试登录")
+        self.session, self.current_proxy = self.login_with_retry(mobile, pwd)
+        if self.session:
+            print(f"账号{mobile}登录成功，使用IP{self.current_proxy}")
+        else:
+            print(f"账号{mobile}登录失败，切换账号")
+            self.switch_to_next_account()
+
+    def login_with_retry(self, mobile, pwd):
+        for _ in range(self.ip_switch_limit):
+            proxy = get_proxy()
+            session = self.login(mobile, pwd, proxy)
+            if session:
+                return session, proxy
+            else:
+                print(f"更换IP{proxy}")
+        return None, None
+
+    def login(self, mobile, pwd, proxy):
+        login_url = f"https://www.izaiwen.cn/user/mobileLogin?mobile={mobile}&pwd={pwd}"
+        session = requests.Session()
+        headers = {
+            'Connection': 'keep-alive',
+            'User-Agent': UserAgent().random
+        }
+        try:
+            response = session.get(login_url, proxies={"https": f"https://{proxy}"}, headers=headers, verify=False, timeout=(10, 10))
+            if response.status_code == 200:
+                verified_response = session.get('https://www.izaiwen.cn/ajax/user/signinrecord', proxies={"https": f"https://{proxy}"}, headers=headers, verify=False, timeout=(10, 10))
+                if verified_response.status_code == 200 and verified_response.json().get("code") == 0:
+                    print("登录成功")
+                    session.cookies.update(verified_response.cookies)
+                    session.headers.update(headers)
+                    return session
+        except Exception as e:
+            print(f"登录失败: {e}")
+        return None
+
+    def switch_to_next_account(self):
+        self.current_index += 1
+        if self.current_index >= len(self.accounts):
+            self.current_index = 0
+            print("所有账号都失败，等待1分钟后重试")
+            time.sleep(60)
+        self.create_new_session()
+
+    def get_session(self):
+        if self.session is None:
+            self.create_new_session()
+        return self.session
+
+    def increment_attempt(self):
+        self.attempt_count += 1
+        if self.attempt_count >= self.max_attempts:
+            print(f"账号{self.accounts[self.current_index]['mobile']}在IP{self.current_proxy}上达到最大尝试次数，切换IP")
+            self.ip_switch_count += 1
+            if self.ip_switch_count >= self.ip_switch_limit:
+                print(f"账号{self.accounts[self.current_index]['mobile']}更换了{self.ip_switch_limit}次IP后仍然失败，切换账号")
+                self.switch_to_next_account()
+            else:
+                # 更换IP并重置尝试次数
+                self.session, self.current_proxy = self.login_with_retry(self.accounts[self.current_index]['mobile'], self.accounts[self.current_index]['pwd'])
+                self.attempt_count = 0
+
+
 def remove_stops_space(input_string):
     # 创建转换表，将这些字符映射到 None
     translation_table = str.maketrans('', '', ''.join(stops_space))
-    # 使用 translate 方法移除这些字符
     return input_string.translate(translation_table)
+
+
+def proxy_geturl(session_manager, url, referer):
+    while True:
+        try:
+            session = session_manager.get_session()
+            headers = {
+                'Connection': 'keep-alive',
+                'User-Agent': UserAgent().random,
+                'Referer': referer
+            }
+
+            # 使用当前session和IP发起请求
+            proxy = session_manager.current_proxy
+            proxies = {"https": f"https://{proxy}"}
+
+            rsp = session.get(url, headers=headers, proxies=proxies, verify=False, timeout=(10, 10))
+            rsp.encoding = 'utf-8'
+            session.cookies.update(rsp.cookies)
+            session.headers.update(headers)
+
+            # 检查网页内容
+            if "访问异常" in rsp.text:
+                print("检测到'访问异常'，立即更换账号和IP")
+                session_manager.switch_to_next_account()
+                continue
+
+            if "再问科研" not in rsp.text:
+                print("未找到'再问科研'，优先更换IP")
+                session_manager.increment_attempt()
+                continue
+
+            # 如果请求成功且内容符合预期
+            print("请求成功")
+            return rsp.text
+
+        except Exception as e:
+            print(f"请求失败: {e}")
+            session_manager.increment_attempt()
+            time.sleep(random.randint(1, 9) * 0.2)
 
 
 def show_files(path, all_files):
@@ -40,18 +224,219 @@ def is_last_folder_in_directory(path):
         parent_dir = os.path.dirname(path)
 
         # 获取父目录中的所有文件夹
-        all_folders = [name for name in os.listdir(parent_dir) if os.path.isdir(os.path.join(parent_dir, name))]
+        all_folders = [os.path.join(parent_dir, name) for name in os.listdir(parent_dir) if os.path.isdir(os.path.join(parent_dir, name))]
 
-        # 按名称升序排列文件夹
-        all_folders.sort()
+        # 找到最新的文件夹
+        latest_subfolder = os.path.basename(max(all_folders, key=os.path.getmtime))
 
         # 获取当前文件夹的名称
         current_folder = os.path.basename(path)
 
         # 检查当前文件夹是否是最后一个文件夹
-        return all_folders[-1] == current_folder
+        return latest_subfolder == current_folder
     else:
         return False
+
+
+def fetch_details_data(child_url, detail_href, session_manager):
+    full_detail_href = urljoin(child_url, detail_href)
+    detail_resp = proxy_geturl(session_manager, full_detail_href, child_url)
+    time.sleep(0.5)
+    detail_tree = etree.HTML(detail_resp)
+    if detail_resp != '':
+        span_text = detail_tree.xpath(
+            '//div[label[contains(text(), "负责人职称：")]]/span/text()')
+        if (span_text is None) or (len(span_text) == 0):
+            academic_title = ''
+        else:
+            academic_title = span_text[0]
+        is_empty = detail_tree.xpath('//div[@id="canyu_wrapper"]//p[@class="empty-data"]/text()')
+        if (is_empty is None) or (len(is_empty) == 0):
+            # 提取表格数据
+            project_join_table = \
+                detail_tree.xpath('//div[@id="canyu_wrapper"]//table[@class="layui-table"]')[0]
+            table_headers = [header.text for header in
+                             project_join_table.xpath('.//thead//th')]
+            table_rows = project_join_table.xpath('.//tbody//tr')
+            join_table = []
+            for row in table_rows:
+                cells = row.xpath('.//td')
+                table_item = {table_headers[i]: cells[i].text for i in
+                              range(len(cells))}
+                join_table.append(table_item)
+        else:
+            join_table = []
+        is_empty_fruit = detail_tree.xpath('//div[@id="fruit_wrapper"]//p[@class="empty-data"]/text()')
+        if (is_empty_fruit is None) or (len(is_empty_fruit) == 0):
+            # 提取表格数据
+            fruit_table = detail_tree.xpath('//div[@id="fruit_wrapper"]//table[@class="layui-table"]')[0]
+            fruit_table_headers = [header.text for header in
+                             fruit_table.xpath('.//thead//th')]
+            fruit_table_rows = fruit_table.xpath('.//tbody//tr')
+            fruit_join_table = []
+            for fruit_row in fruit_table_rows:
+                fruit_cells = fruit_row.xpath('.//td')
+                fruit_table_item = {}
+                for fruit_num in range(len(fruit_cells)):
+                    if fruit_table_headers[fruit_num] == '标题':
+                        fruit_table_item[fruit_table_headers[fruit_num]] = ''.join(fruit_cells[fruit_num].xpath('./a/@title'))
+                    else:
+                        fruit_table_item[fruit_table_headers[fruit_num]] = fruit_cells[fruit_num].text
+                fruit_join_table.append(fruit_table_item)
+        else:
+            fruit_join_table = []
+        return academic_title, join_table, fruit_join_table
+    else:
+        print(f'Failed to fetch data: {full_detail_href}')
+        time.sleep(240)
+        fetch_details_data(child_url, detail_href, session_manager)
+
+
+def fetch_page_data(year, funding_type, subject2, child_url, path, session_manager, url):
+    try:
+        child_resp = proxy_geturl(session_manager, child_url, url)
+        time.sleep(0.5)
+        if child_resp != '':
+            child_tree = etree.HTML(child_resp)
+            project_num_lst = child_tree.xpath(
+                '//div[@class="item-box layui-card "]//div[contains(text(), "项目批准号：")]/text()')
+            project_num_lst = [x.strip() for x in project_num_lst]
+            with open(os.path.join(path, 'project_num_lst.json'), mode='w', encoding='utf-8') as lf:
+                lf.write(json.dumps(project_num_lst, ensure_ascii=False, indent=4))
+            # 提取项目
+            cards = child_tree.xpath('//div[@class="item-box layui-card "]')
+
+            # 构建JSON
+            for card in cards:
+                title = card.xpath('./a/@title')[0]
+                detail_href = card.xpath('./a/@href')[0]
+                project_num = \
+                    card.xpath('.//div[contains(text(), "项目批准号：")]/text()')[0].split("：")[
+                        1].strip()
+                approval_year = \
+                    card.xpath('.//div[contains(text(), "批准年份：")]/text()')[0].split("：")[
+                        1].strip()
+                discipline = \
+                    card.xpath('.//div[contains(text(), "学科分类：")]/text()')[0].split("：")[
+                        1].strip()
+                leader = \
+                    card.xpath('.//div[contains(text(), "负责人：")]/text()')[0].split("：")[
+                        1].strip()
+                province = \
+                    card.xpath('.//div[contains(text(), "省份：")]/text()')[0].split("：")[
+                        1].strip()
+                institution = \
+                    card.xpath('.//div[contains(text(), "依托单位：")]/text()')[0].split("：")[
+                        1].strip()
+                funding = \
+                    card.xpath('.//div[contains(text(), "资助金额：")]/text()')[0].split("：")[
+                        1].strip()
+                category = \
+                    card.xpath('.//div[contains(text(), "资助类别：")]/text()')[0].split("：")[
+                        1].strip()
+                keywords = \
+                    card.xpath('.//div[contains(text(), "关键词：")]/text()')[0].split("：")[
+                        1].strip()
+                outcomes = \
+                    card.xpath('.//div[contains(text(), "研究成果：")]/text()')[0].split("：")[
+                        1].strip()
+                participants = \
+                    card.xpath('.//div[contains(text(), "参与人数:")]/text()')[0].split(":")[
+                        1].strip()
+                file_path = os.path.join(path, f'{project_num}.json')
+                if os.path.isfile(file_path):
+                    continue
+                else:
+                    academic_title, join_table, fruit_join_table = fetch_details_data(child_url, detail_href, session_manager)
+                    item = {
+                        "标题": title,
+                        "项目批准号": project_num,
+                        "批准年份": approval_year,
+                        "学科分类": discipline,
+                        "负责人": leader,
+                        "负责人职称": academic_title,
+                        "省份": province,
+                        "依托单位": institution,
+                        "资助金额": funding,
+                        "资助类别": category,
+                        "关键词": keywords,
+                        "研究成果": outcomes,
+                        "研究成果表": fruit_join_table,
+                        "参与人数": participants,
+                        "项目参与人": join_table
+                    }
+
+                    with open(file_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps(item, ensure_ascii=False, indent=4))
+                    print(f'{item}\n-------------------------------------------------')
+        else:
+            print(f'Failed to fetch data: {child_url}')
+            time.sleep(240)
+            fetch_page_data(year, funding_type, subject2, child_url, path, session_manager, url)
+    except:
+        print(f'Failed to fetch data: {child_url}')
+        time.sleep(240)
+        fetch_page_data(year, funding_type, subject2, child_url, path, session_manager, url)
+
+
+def fetch_url_data(year, funding_type, subject2, session_manager):
+    url = f"https://www.izaiwen.cn/pro/{funding_type}-{subject2}?psnname=&orgname=&prjno=&sy={year}&ey={year}&sjy=&ejy=&st=&et=&keyword=&canyu_name=&canyu_orgname="
+    referer = f"https://www.izaiwen.cn/pro/{funding_type}-{subject2}"
+    try:
+        resp = proxy_geturl(session_manager, url, referer)
+        time.sleep(0.5)
+        if resp != '':
+            tree = etree.HTML(resp)
+            # 提取查询总数
+            results_num = tree.xpath('//blockquote[@class="m-t-34 m-b-25 total-result"]//span[@class="num"]/text()')
+            if (results_num is None) or (len(results_num) == 0):
+                with open('../data/error.txt', mode='a', encoding='utf-8_sig') as error_f:
+                    error_f.write(f'{url}\n')
+                time.sleep(360)
+            else:
+                results_num_real = int(results_num[0].strip())
+                if results_num_real <= 5000:
+                    if results_num_real <= 10:
+                        final_page = 1
+                    else:
+                        page_num = tree.xpath('//li[@class="page-item"]/a/text()')
+                        final_page = int(page_num[-2])
+                    with open('../data/page_result_num.csv', mode='a', encoding='utf-8_sig', newline='') as page_f:
+                        writer = csv.writer(page_f)
+                        writer.writerow([year, funding_type, subject2, final_page, results_num_real])
+                    for page in range(1, final_page + 1):
+                        path = f'../data/{year}/{funding_type_dict[funding_type]}/{subject2_dict[subject2]}/page{page}'
+                        os.makedirs(path, exist_ok=True)
+                        exist_files = show_files(path, [])
+                        if len(exist_files) >= 11:
+                            continue
+                        else:
+                            child_url = f"https://www.izaiwen.cn/pro/{funding_type}-{subject2}?sy={year}&ey={year}&page={page}"
+                            if page == 1:
+                                fetch_page_data(year, funding_type, subject2, child_url, path, session_manager, url)
+                            else:
+                                fetch_page_data(year, funding_type, subject2, child_url, path, session_manager, f"https://www.izaiwen.cn/pro/{funding_type}-{subject2}?sy={year}&ey={year}&page={page-1}")
+                            print(
+                                f'====={year}/{funding_type_dict[funding_type]}/{subject2_dict[subject2]}/{page}页完成=====')
+
+                else:
+                    with open('../data/search_overflow.txt', mode='a', encoding='utf-8_sig') as error_f:
+                        error_f.write(f'{url}\n')
+                    time.sleep(240)
+        else:
+            with open('../data/error.txt', mode='a', encoding='utf-8_sig') as error_f:
+                error_f.write(f'{url}\n')
+            time.sleep(240)
+            fetch_url_data(year, funding_type, subject2, session_manager)
+        with open('../data/over.txt', mode='a', encoding='utf-8_sig') as over_f:
+            over_f.write(f'{url}\n')
+    except:
+        print(f'Failed to fetch data: {url}')
+        with open('../data/error.txt', mode='a', encoding='utf-8_sig') as error_f:
+            error_f.write(f'{url}\n')
+        time.sleep(240)
+        fetch_url_data(year, funding_type, subject2, session_manager)
+
 
 
 if __name__ == '__main__':
@@ -66,169 +451,16 @@ if __name__ == '__main__':
         subject2_lst = f.readlines()
     subject2_dict = {}
     for item in subject2_lst:
-        lst = item.strip().split('|')
-        subject2_dict[lst[0]] = lst[1]
+        if item.strip() != 'sonQT-stwQT|QT.其它':
+            lst = item.strip().split('|')
+            subject2_dict[lst[0]] = lst[1]
 
-
-    cookie = "uuid=eyJpdiI6InQrMUdvaXVwbGUwaGg4VE9VU0MzYUE9PSIsInZhbHVlIjoidDNJZWdGU0pqdm9sWGhrY1FycG9cL3pid3cxaEp4blVhWVZUQ2JGNzRhQ2tjaENRV3g0cW5YSk82aUVIYXBQMUYiLCJtYWMiOiI4MmFjMDcxMThmMTgzMGIxZGM1M2UwODAwZWI2NGY0YjdhN2M1NTRiMDc2YjE0NDRlNTVkY2QxZTc1NWVkYTJjIn0%3D; userId=220632; _c_WBKFRo=E9jtIyOZHqvt5Ci1nVWZ7rabgn6OvSd11e6crE2E; acw_tc=7b39758517213674129416377e53d667d2e6fbd58143c4f3bf1f7b473e7a08; Hm_lvt_0449d831efe3131221f6d2f2b6c91897=1721265098,1721285873,1721289158,1721367420; HMACCOUNT=D263DB9A03DE3735; Hm_lvt_0bd5902d44e80b78cb1cd01ca0e85f4a=1721285364,1721285874,1721289158,1721367420; counter=eyJpdiI6IjVDb2orTVVSRUdWQk1NOTljMDF0Z1E9PSIsInZhbHVlIjoiakQ3cWwrcGUwREUxOGpzQkxRTVRQZz09IiwibWFjIjoiN2E4ZTdhYjkwOTQwMTU2OGYwY2EyNmQ3YTlkZTI4MjcyNjEzZTExY2QxZDZjOTZhNjljNjlhZjdhYTUzYTVlMyJ9; Hm_lpvt_0449d831efe3131221f6d2f2b6c91897=1721367743; Hm_lpvt_0bd5902d44e80b78cb1cd01ca0e85f4a=1721367743; gzr_session=eyJpdiI6InJXbzNlcDVRSDZNV0l3RVdncGl4MFE9PSIsInZhbHVlIjoiODdoR3lIeXUrdE93MnNrXC84Y0liUmMxbHJpWlJhc2JlcHFpYXN1UGFNTlV6bDJNVUU4dmdWUzdMVXU1bjladHAiLCJtYWMiOiIyOTUzZjUzZGQwNmYyNjdiOTc3YTVjNmExOTQyZTdlNjI3MmIyZDE2ZDVkMzY1MDNmYzE3ODNhZmI5NzFmMjIxIn0%3D"
-    user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36'
-    headers = {'User_Agent': user_agent, 'Cookie': cookie}
-
+    session_manager = SessionManager(accounts)
     for year in range(2019, 2024):
         for funding_type in funding_type_dict:
             for subject2 in subject2_dict:
                 folder_path = f'../data/{year}/{funding_type_dict[funding_type]}/{subject2_dict[subject2]}'
                 if (os.path.isdir(folder_path) == False) or (is_last_folder_in_directory(folder_path) == True):
                     os.makedirs(folder_path, exist_ok=True)
-                    try:
-                        url = f"https://www.izaiwen.cn/pro/{funding_type}-{subject2}"
-                        params = {'sy': year, 'ey': year}
-                        resp = requests.get(url, headers=headers, params=params)
-                        time.sleep(0.5)
-                        resp.encoding = 'utf-8'
-                        tree = etree.HTML(resp.text)
-                        access_exception = tree.xpath('//h1//text()')
-                        if (resp.status_code == 200) & (access_exception[0] != '访问异常，请稍后再试~ '):
-                            # 提取查询总数
-                            results_num = tree.xpath('//blockquote[@class="m-t-34 m-b-25 total-result"]//span[@class="num"]/text()')
-                            if (results_num is None) or (len(results_num) == 0):
-                                with open('../data/error.txt', mode='a', encoding='utf-8_sig') as error_f:
-                                    error_f.write(f'{url}\n')
-                                time.sleep(360)
-                            else:
-                                results_num_real = int(results_num[0].strip())
-                                if results_num_real <= 5000:
-                                    page_num = tree.xpath('//li[@class="page-item"]/a/text()')
-                                    final_page = int(page_num[-2])
-                                    for page in range(1, final_page+1):
-                                        path = f'../data/{year}/{funding_type_dict[funding_type]}/{subject2_dict[subject2]}/page{page}'
-                                        os.makedirs(path, exist_ok=True)
-                                        exist_files = show_files(path, [])
-                                        if len(exist_files) >= 10:
-                                            continue
-                                        else:
-                                            params['page'] = page
-                                            child_resp = requests.get(url, headers=headers, params=params)
-                                            time.sleep(0.5)
-                                            child_resp.encoding = 'utf-8'
-                                            child_tree = etree.HTML(child_resp.text)
-                                            access_exception = child_tree.xpath('//h1//text()')
-                                            if (child_resp.status_code == 200) & (access_exception[0] != '访问异常，请稍后再试~ '):
-                                                # 提取项目卡片
-                                                cards = child_tree.xpath('//div[@class="item-box layui-card "]')
+                    fetch_url_data(year, funding_type, subject2, session_manager)
 
-                                                # 构建JSON数据
-                                                for card in cards:
-                                                    title = card.xpath('./a/@title')[0]
-                                                    detail_href = card.xpath('./a/@href')[0]
-                                                    project_num = \
-                                                    card.xpath('.//div[contains(text(), "项目批准号：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    approval_year = \
-                                                    card.xpath('.//div[contains(text(), "批准年份：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    discipline = \
-                                                    card.xpath('.//div[contains(text(), "学科分类：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    leader = \
-                                                    card.xpath('.//div[contains(text(), "负责人：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    province = \
-                                                    card.xpath('.//div[contains(text(), "省份：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    institution = \
-                                                    card.xpath('.//div[contains(text(), "依托单位：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    funding = \
-                                                    card.xpath('.//div[contains(text(), "资助金额：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    category = \
-                                                    card.xpath('.//div[contains(text(), "资助类别：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    keywords = \
-                                                    card.xpath('.//div[contains(text(), "关键词：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    outcomes = \
-                                                    card.xpath('.//div[contains(text(), "研究成果：")]/text()')[0].split("：")[
-                                                        1].strip()
-                                                    participants = \
-                                                    card.xpath('.//div[contains(text(), "参与人数:")]/text()')[0].split(":")[
-                                                        1].strip()
-                                                    file_path = os.path.join(path, f'{project_num}.json')
-                                                    if os.path.isfile(file_path):
-                                                        continue
-                                                    else:
-                                                        full_detail_href = urljoin(child_resp.url, detail_href)
-                                                        detail_resp = requests.get(full_detail_href, headers=headers)
-                                                        time.sleep(0.5)
-                                                        detail_resp.encoding = 'utf-8'
-                                                        detail_tree = etree.HTML(detail_resp.text)
-                                                        access_exception = detail_tree.xpath('//h1//text()')
-                                                        if (detail_resp.status_code == 200) & (access_exception[0] != '访问异常，请稍后再试~ '):
-                                                            span_text = detail_tree.xpath(
-                                                                '//div[label[contains(text(), "负责人职称：")]]/span/text()')
-                                                            if (span_text is None) or (len(span_text) == 0):
-                                                                academic_title = ''
-                                                                with open('../data/error.txt', mode='a', encoding='utf-8_sig') as error_f:
-                                                                    error_f.write(f'{url}\n')
-                                                            else:
-                                                                academic_title = span_text[0]
-                                                            is_empty = detail_tree.xpath('//div[@id="canyu_wrapper"]//p[@class="empty-data"]/text()')
-                                                            if (is_empty is None) or (len(is_empty) == 0):
-                                                                # 提取表格数据
-                                                                project_join_table = detail_tree.xpath('//div[@id="canyu_wrapper"]//table[@class="layui-table"]')[0]
-                                                                table_headers = [header.text for header in
-                                                                                 project_join_table.xpath('.//thead//th')]
-                                                                table_rows = project_join_table.xpath('.//tbody//tr')
-                                                                join_table = []
-                                                                for row in table_rows:
-                                                                    cells = row.xpath('.//td')
-                                                                    table_item = {table_headers[i]: cells[i].text for i in
-                                                                                  range(len(cells))}
-                                                                    join_table.append(table_item)
-                                                            else:
-                                                                join_table = []
-                                                        else:
-                                                            with open('../data/error.txt', mode='a', encoding='utf-8_sig') as error_f:
-                                                                error_f.write(f'{detail_resp.url}\n')
-                                                            time.sleep(360)
-                                                            join_table = []
-                                                            academic_title = ''
-                                                        item = {
-                                                            "标题": title,
-                                                            "项目批准号": project_num,
-                                                            "批准年份": approval_year,
-                                                            "学科分类": discipline,
-                                                            "负责人": leader,
-                                                            "负责人职称": academic_title,
-                                                            "省份": province,
-                                                            "依托单位": institution,
-                                                            "资助金额": funding,
-                                                            "资助类别": category,
-                                                            "关键词": keywords,
-                                                            "研究成果": outcomes,
-                                                            "参与人数": participants,
-                                                            "项目参与人": join_table
-                                                        }
-                                                        # 将JSON数据保存到文件
-                                                        with open(file_path, 'a', encoding='utf-8') as f:
-                                                            f.write(json.dumps(item, ensure_ascii=False, indent=4))
-                                                        print(f'{item}\n-------------------------------------------------')
-                                            else:
-                                                with open('../data/error.txt', mode='a', encoding='utf-8_sig') as error_f:
-                                                    error_f.write(f'{child_resp.url}\n')
-                                            print(f'====={year}/{funding_type_dict[funding_type]}/{subject2_dict[subject2]}/{page}页完成=====')
-
-                                else:
-                                    with open('../data/search_overflow.txt', mode='a', encoding='utf-8_sig') as error_f:
-                                        error_f.write(f'{url}\n')
-                                    time.sleep(360)
-                        else:
-                            with open('../data/error.txt', mode='a', encoding='utf-8_sig') as error_f:
-                                error_f.write(f'{url}\n')
-                            time.sleep(360)
-                        with open('../data/over.txt', mode='a', encoding='utf-8_sig') as over_f:
-                            over_f.write(f'{url}\n')
-                    except requests.exceptions.RequestException as err:
-                        print("其他错误:", err)
-                        time.sleep(360)
